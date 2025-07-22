@@ -27,12 +27,21 @@ DEFAULT_TAX_FIELDS = {
 	"sales_tax": "default_sales_tax_account",
 	"shipping": "default_shipping_charges_account",
 }
+warehouse_destination_map = {
+	"Shopify Available for Sale - KR": "Karen Graded Sold - KR",
+	# "Ravine Available for Sale - KR": "Ravine Graded Sold - KR",
+}
 
+warehouse_farm_map = {
+	"Karen Available for Sale - KR": "Karen",
+	"Ravine Available for Sale - KR": "Kapkolia",
+}
 
 def sync_sales_order(payload, request_id=None):
 	order = payload
 	frappe.set_user("Administrator")
 	frappe.flags.request_id = request_id
+	# frappe.log_error(order.get("currency"))
 
 	if frappe.db.get_value("Sales Order", filters={ORDER_ID_FIELD: cstr(order["id"])}):
 		create_shopify_log(status="Invalid", message="Sales order already exists, not synced")
@@ -63,6 +72,7 @@ def create_order(order, setting, company=None):
 	# local import to avoid circular dependencies
 	from ecommerce_integrations.shopify.fulfillment import create_delivery_note
 	from ecommerce_integrations.shopify.invoice import create_sales_invoice
+	# frappe.throw(order.get("currency"))
 
 	so = create_sales_order(order, setting, company)
 	if so:
@@ -100,8 +110,9 @@ def create_sales_order(shopify_order, setting, company=None):
 			create_shopify_log(status="Error", exception=message, rollback=True)
 
 			return ""
-
+#create sales order
 		taxes = get_order_taxes(shopify_order, setting, items)
+		# currency = "EUR"
 		so = frappe.get_doc(
 			{
 				"doctype": "Sales Order",
@@ -116,7 +127,14 @@ def create_sales_order(shopify_order, setting, company=None):
 				"ignore_pricing_rule": 1,
 				"items": items,
 				"taxes": taxes,
+				# "currency": currency,
+				# "conversion_rate": shopify_order.get("currency_rate", 1.0),
 				"tax_category": get_dummy_tax_category(),
+				"custom_sales_order_type": "Roses",
+				"custom_business_unit": "Roses",
+				"custom_farm": warehouse_farm_map.get(
+					shopify_order.get("location_id"), "Karen"
+				),  # Default to Karen if not found
 			}
 		)
 
@@ -151,6 +169,8 @@ def get_order_items(order_items, setting, delivery_date, taxes_inclusive):
 
 		if all_product_exists:
 			item_code = get_item_code(shopify_item)
+			source_warehouse = shopify_item.get("warehouse") or setting.warehouse
+			destination_warehouse = warehouse_destination_map.get(source_warehouse)
 			items.append(
 				{
 					"item_code": item_code,
@@ -158,8 +178,10 @@ def get_order_items(order_items, setting, delivery_date, taxes_inclusive):
 					"rate": _get_item_price(shopify_item, taxes_inclusive),
 					"delivery_date": delivery_date,
 					"qty": shopify_item.get("quantity"),
-					"stock_uom": shopify_item.get("uom") or "Nos",
-					"warehouse": setting.warehouse,
+					# "stock_uom": shopify_item.get("uom") or "Nos",
+					"stock_uom": "Stems",
+					"warehouse": destination_warehouse,
+					"custom_source_warehouse": source_warehouse,
 					ORDER_ITEM_DISCOUNT_FIELD: (
 						_get_total_discount(shopify_item) / cint(shopify_item.get("quantity"))
 					),
