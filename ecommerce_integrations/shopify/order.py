@@ -177,6 +177,7 @@ def get_order_items(order_items, setting, delivery_date, taxes_inclusive):
 					"item_name": shopify_item.get("name"),
 					"rate": _get_item_price(shopify_item, taxes_inclusive),
 					"delivery_date": delivery_date,
+					"custom_length": _get_item_length(shopify_item),
 					"qty": shopify_item.get("quantity"),
 					# "stock_uom": shopify_item.get("uom") or "Nos",
 					"stock_uom": "Stems",
@@ -208,6 +209,21 @@ def _get_item_price(line_item, taxes_inclusive: bool) -> float:
 		total_taxes += flt(tax.get("price"))
 
 	return price - (total_taxes + total_discount) / qty
+
+def _get_item_length(line_item):
+	"""Get item length from line item, add 2cm, and return as string with 'cm'."""
+	if line_item.get("properties"):
+		for prop in line_item.get("properties"):
+			if prop.get("name", "").lower() == "length":
+				try:
+					val = prop.get("value")
+					if isinstance(val, str) and val.strip().endswith("cm"):
+						val = val.strip()[:-2].strip()
+					length = int(val)
+					return f"{length + 2}cm"
+				except (TypeError, ValueError):
+					return prop.get("value")
+	return None
 
 
 def _get_total_discount(line_item) -> float:
