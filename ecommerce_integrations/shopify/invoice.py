@@ -31,7 +31,6 @@ def prepare_sales_invoice(payload, request_id=None):
 
 
 def create_sales_invoice(shopify_order, setting, so):
-	# frappe.throw("Reached here")
 	if (
 		not frappe.db.get_value("Sales Invoice", {ORDER_ID_FIELD: shopify_order.get("id")}, "name")
 		and so.docstatus == 1
@@ -49,7 +48,6 @@ def create_sales_invoice(shopify_order, setting, so):
 		sales_invoice.naming_series = setting.sales_invoice_series or "SI-Shopify-"
 		sales_invoice.flags.ignore_mandatory = True
 		set_cost_center(sales_invoice.items, setting.cost_center)
-		# sales_invoice.currency = "EUR"
 		sales_invoice.insert(ignore_mandatory=True)
 		sales_invoice.submit()
 		if sales_invoice.grand_total > 0:

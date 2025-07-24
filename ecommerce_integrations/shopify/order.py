@@ -37,11 +37,61 @@ warehouse_farm_map = {
 	"Ravine Available for Sale - KR": "Kapkolia",
 }
 
+def get_exchange_rate(from_currency, to_currency, transaction_date=None):
+	"""
+	Get exchange rate between currencies from ERPNext Currency Exchange
+	"""
+	if from_currency == to_currency:
+		return 1.0
+		
+	if not transaction_date:
+		transaction_date = nowdate()
+		
+	# Try to get exchange rate from ERPNext
+	exchange_rate = frappe.db.get_value(
+		"Currency Exchange",
+		{
+			"from_currency": from_currency,
+			"to_currency": to_currency,
+			"date": ("<=", transaction_date)
+		},
+		"exchange_rate",
+		order_by="date desc"
+	)
+	
+	if not exchange_rate:
+		# Try reverse rate
+		reverse_rate = frappe.db.get_value(
+			"Currency Exchange",
+			{
+				"from_currency": to_currency,
+				"to_currency": from_currency,
+				"date": ("<=", transaction_date)
+			},
+			"exchange_rate",
+			order_by="date desc"
+		)
+		if reverse_rate:
+			exchange_rate = 1 / reverse_rate
+	
+	if not exchange_rate:
+		# If no exchange rate found, log error but don't stop processing
+		frappe.log_error(
+			f"Exchange rate not found for {from_currency} to {to_currency} on {transaction_date}. Using rate 1.0",
+			"Shopify Currency Exchange Error"
+		)
+		return 1.0
+	
+	return flt(exchange_rate)
+
+def get_company_currency(company):
+	"""Get company's default currency"""
+	return frappe.get_cached_value("Company", company, "default_currency") or "USD"
+
 def sync_sales_order(payload, request_id=None):
 	order = payload
 	frappe.set_user("Administrator")
 	frappe.flags.request_id = request_id
-	# frappe.log_error(order.get("currency"))
 
 	if frappe.db.get_value("Sales Order", filters={ORDER_ID_FIELD: cstr(order["id"])}):
 		create_shopify_log(status="Invalid", message="Sales order already exists, not synced")
@@ -69,18 +119,78 @@ def sync_sales_order(payload, request_id=None):
 
 
 def create_order(order, setting, company=None):
-	# local import to avoid circular dependencies
-	from ecommerce_integrations.shopify.fulfillment import create_delivery_note
-	from ecommerce_integrations.shopify.invoice import create_sales_invoice
-	# frappe.throw(order.get("currency"))
+    from ecommerce_integrations.shopify.fulfillment import create_delivery_note
+    from ecommerce_integrations.shopify.invoice import create_sales_invoice
 
-	so = create_sales_order(order, setting, company)
-	if so:
-		if order.get("financial_status") == "paid":
-			create_sales_invoice(order, setting, so)
+    # Get company default currency
+    company_currency = frappe.get_cached_value("Company", setting.company, "default_currency") or "USD"
+    shopify_currency = order.get("currency") or order.get("presentment_currency") or "USD"
+    order_date = order.get("created_at") or nowdate()
 
-		if order.get("fulfillments"):
-			create_delivery_note(order, setting, so)
+    if shopify_currency != company_currency:
+        # Log the conversion for tracking
+        frappe.log_error(
+            f"Converting order {order.get('id')} from {shopify_currency} to {company_currency}",
+            "Shopify Currency Conversion"
+        )
+        # Get exchange rate using your existing function
+        conversion_rate = get_exchange_rate(shopify_currency, company_currency, order_date)
+        # Convert all monetary values in the order
+        order = convert_order_currency(order, conversion_rate, company_currency)
+    else:
+        conversion_rate = 1.0
+        order["conversion_rate"] = conversion_rate
+
+    # Create the sales order
+    so = create_sales_order(order, setting, company)
+
+    if so:
+        if order.get("financial_status") == "paid":
+            create_sales_invoice(order, setting, so)
+
+        if order.get("fulfillments"):
+            create_delivery_note(order, setting, so)
+
+    return so
+
+
+def convert_order_currency(order, conversion_rate, target_currency):
+    """Convert all monetary values in the order to target currency"""
+    # Convert main order values
+    for key in ("total_price", "subtotal_price", "total_tax"):
+        if key in order:
+            order[key] = str(float(order[key]) * conversion_rate)
+
+    # Convert line item prices
+    for item in order.get("line_items", []):
+        if "price" in item:
+            item["price"] = str(float(item["price"]) * conversion_rate)
+        # Also convert presentment_money if present
+        if "price_set" in item and "presentment_money" in item["price_set"]:
+            pm = item["price_set"]["presentment_money"]
+            if "amount" in pm:
+                pm["amount"] = str(float(pm["amount"]) * conversion_rate)
+            pm["currency_code"] = target_currency
+
+    # Convert shipping lines
+    for shipping in order.get("shipping_lines", []):
+        if "price" in shipping:
+            shipping["price"] = str(float(shipping["price"]) * conversion_rate)
+        for tax in shipping.get("tax_lines", []):
+            if "price" in tax:
+                tax["price"] = str(float(tax["price"]) * conversion_rate)
+
+    # Convert tax lines in line items
+    for item in order.get("line_items", []):
+        for tax in item.get("tax_lines", []):
+            if "price" in tax:
+                tax["price"] = str(float(tax["price"]) * conversion_rate)
+
+    # Update currency
+    order["currency"] = target_currency
+    order["conversion_rate"] = conversion_rate
+
+    return order
 
 
 def create_sales_order(shopify_order, setting, company=None):
@@ -92,11 +202,27 @@ def create_sales_order(shopify_order, setting, company=None):
 	so = frappe.db.get_value("Sales Order", {ORDER_ID_FIELD: shopify_order.get("id")}, "name")
 
 	if not so:
+		# Get currency information from Shopify order
+		shopify_currency = shopify_order.get("currency") or shopify_order.get("presentment_currency") or "USD"
+		company_currency = get_company_currency(setting.company)
+		order_date = getdate(shopify_order.get("created_at")) or nowdate()
+		
+		# Get exchange rate
+		conversion_rate = get_exchange_rate(shopify_currency, company_currency, order_date)
+		
+		# Log currency information for debugging
+		frappe.log_error(
+			f"Shopify Order Currency: {shopify_currency}, Company Currency: {company_currency}, Conversion Rate: {conversion_rate}",
+			"Shopify Currency Debug"
+		)
+
 		items = get_order_items(
 			shopify_order.get("line_items"),
 			setting,
-			getdate(shopify_order.get("created_at")),
+			order_date,
 			taxes_inclusive=shopify_order.get("taxes_included"),
+			shopify_currency=shopify_currency,
+			conversion_rate=conversion_rate,
 		)
 
 		if not items:
@@ -110,9 +236,9 @@ def create_sales_order(shopify_order, setting, company=None):
 			create_shopify_log(status="Error", exception=message, rollback=True)
 
 			return ""
-#create sales order
-		taxes = get_order_taxes(shopify_order, setting, items)
-		# currency = "EUR"
+
+		taxes = get_order_taxes(shopify_order, setting, items, shopify_currency, conversion_rate)
+		
 		so = frappe.get_doc(
 			{
 				"doctype": "Sales Order",
@@ -120,15 +246,15 @@ def create_sales_order(shopify_order, setting, company=None):
 				ORDER_ID_FIELD: str(shopify_order.get("id")),
 				ORDER_NUMBER_FIELD: shopify_order.get("name"),
 				"customer": customer,
-				"transaction_date": getdate(shopify_order.get("created_at")) or nowdate(),
-				"delivery_date": getdate(shopify_order.get("created_at")) or nowdate(),
+				"transaction_date": order_date,
+				"delivery_date": order_date,
 				"company": setting.company,
 				"selling_price_list": get_dummy_price_list(),
 				"ignore_pricing_rule": 1,
 				"items": items,
 				"taxes": taxes,
-				# "currency": currency,
-				# "conversion_rate": shopify_order.get("currency_rate", 1.0),
+				"currency": shopify_currency,  # Set the actual Shopify currency
+				"conversion_rate": conversion_rate,  # Set the proper conversion rate
 				"tax_category": get_dummy_tax_category(),
 				"custom_sales_order_type": "Roses",
 				"custom_business_unit": "Roses",
@@ -154,7 +280,7 @@ def create_sales_order(shopify_order, setting, company=None):
 	return so
 
 
-def get_order_items(order_items, setting, delivery_date, taxes_inclusive):
+def get_order_items(order_items, setting, delivery_date, taxes_inclusive, shopify_currency, conversion_rate):
 	items = []
 	all_product_exists = True
 	product_not_exists = []
@@ -171,15 +297,18 @@ def get_order_items(order_items, setting, delivery_date, taxes_inclusive):
 			item_code = get_item_code(shopify_item)
 			source_warehouse = shopify_item.get("warehouse") or setting.warehouse
 			destination_warehouse = warehouse_destination_map.get(source_warehouse)
+			
+			# Get the proper item price with currency handling
+			item_rate = _get_item_price(shopify_item, taxes_inclusive, shopify_currency)
+			
 			items.append(
 				{
 					"item_code": item_code,
 					"item_name": shopify_item.get("name"),
-					"rate": _get_item_price(shopify_item, taxes_inclusive),
+					"rate": item_rate,  # This will be in the Shopify currency
 					"delivery_date": delivery_date,
 					"custom_length": _get_item_length(shopify_item),
 					"qty": shopify_item.get("quantity"),
-					# "stock_uom": shopify_item.get("uom") or "Nos",
 					"stock_uom": "Stems",
 					"warehouse": destination_warehouse,
 					"custom_source_warehouse": source_warehouse,
@@ -194,9 +323,24 @@ def get_order_items(order_items, setting, delivery_date, taxes_inclusive):
 	return items
 
 
-def _get_item_price(line_item, taxes_inclusive: bool) -> float:
-	price = flt(line_item.get("price"))
+def _get_item_price(line_item, taxes_inclusive: bool, shopify_currency: str) -> float:
+	"""
+	Get item price from Shopify line item with proper currency handling
+	"""
+	# Use presentment_money which contains the actual charged currency and amount
+	price_set = line_item.get("price_set", {})
+	presentment_money = price_set.get("presentment_money", {})
+	
+	if presentment_money and presentment_money.get("currency_code") == shopify_currency:
+		# Use the presentment money amount (this is the actual charged amount)
+		price = flt(presentment_money.get("amount", 0))
+	else:
+		# Fallback to the price field
+		price = flt(line_item.get("price", 0))
+	
 	qty = cint(line_item.get("quantity"))
+	if qty == 0:
+		return 0
 
 	# remove line item level discounts
 	total_discount = _get_total_discount(line_item)
@@ -205,7 +349,7 @@ def _get_item_price(line_item, taxes_inclusive: bool) -> float:
 		return price - (total_discount / qty)
 
 	total_taxes = 0.0
-	for tax in line_item.get("tax_lines"):
+	for tax in line_item.get("tax_lines", []):
 		total_taxes += flt(tax.get("price"))
 
 	return price - (total_taxes + total_discount) / qty
@@ -231,13 +375,16 @@ def _get_total_discount(line_item) -> float:
 	return sum(flt(discount.get("amount")) for discount in discount_allocations)
 
 
-def get_order_taxes(shopify_order, setting, items):
+def get_order_taxes(shopify_order, setting, items, shopify_currency, conversion_rate):
 	taxes = []
 	line_items = shopify_order.get("line_items")
 
 	for line_item in line_items:
 		item_code = get_item_code(line_item)
 		for tax in line_item.get("tax_lines"):
+			# Get tax amount in Shopify currency
+			tax_amount = flt(tax.get("price"))
+			
 			taxes.append(
 				{
 					"charge_type": "Actual",
@@ -246,10 +393,10 @@ def get_order_taxes(shopify_order, setting, items):
 						get_tax_account_description(tax)
 						or f"{tax.get('title')} - {tax.get('rate') * 100.0:.2f}%"
 					),
-					"tax_amount": tax.get("price"),
+					"tax_amount": tax_amount,  # This will be in Shopify currency
 					"included_in_print_rate": 0,
 					"cost_center": setting.cost_center,
-					"item_wise_tax_detail": {item_code: [flt(tax.get("rate")) * 100, flt(tax.get("price"))]},
+					"item_wise_tax_detail": {item_code: [flt(tax.get("rate")) * 100, tax_amount]},
 					"dont_recompute_tax": 1,
 				}
 			)
@@ -260,6 +407,8 @@ def get_order_taxes(shopify_order, setting, items):
 		setting,
 		items,
 		taxes_inclusive=shopify_order.get("taxes_included"),
+		shopify_currency=shopify_currency,
+		conversion_rate=conversion_rate,
 	)
 
 	if cint(setting.consolidate_taxes):
@@ -327,7 +476,7 @@ def get_tax_account_description(tax):
 	return tax_description
 
 
-def update_taxes_with_shipping_lines(taxes, shipping_lines, setting, items, taxes_inclusive=False):
+def update_taxes_with_shipping_lines(taxes, shipping_lines, setting, items, taxes_inclusive=False, shopify_currency="USD", conversion_rate=1.0):
 	"""Shipping lines represents the shipping details,
 	each such shipping detail consists of a list of tax_lines"""
 	shipping_as_item = cint(setting.add_shipping_as_item) and setting.shipping_item
@@ -339,6 +488,7 @@ def update_taxes_with_shipping_lines(taxes, shipping_lines, setting, items, taxe
 			shipping_taxes = shipping_charge.get("tax_lines") or []
 			total_tax = sum(flt(discount.get("price")) for discount in shipping_taxes)
 
+			# Get shipping amount in Shopify currency
 			shipping_charge_amount = flt(shipping_charge["price"]) - flt(total_discount)
 			if bool(taxes_inclusive):
 				shipping_charge_amount -= total_tax
@@ -347,7 +497,7 @@ def update_taxes_with_shipping_lines(taxes, shipping_lines, setting, items, taxe
 				items.append(
 					{
 						"item_code": setting.shipping_item,
-						"rate": shipping_charge_amount,
+						"rate": shipping_charge_amount,  # This will be in Shopify currency
 						"delivery_date": items[-1]["delivery_date"] if items else nowdate(),
 						"qty": 1,
 						"stock_uom": "Nos",
@@ -361,12 +511,14 @@ def update_taxes_with_shipping_lines(taxes, shipping_lines, setting, items, taxe
 						"account_head": get_tax_account_head(shipping_charge, charge_type="shipping"),
 						"description": get_tax_account_description(shipping_charge)
 						or shipping_charge["title"],
-						"tax_amount": shipping_charge_amount,
+						"tax_amount": shipping_charge_amount,  # This will be in Shopify currency
 						"cost_center": setting.cost_center,
 					}
 				)
 
 		for tax in shipping_charge.get("tax_lines"):
+			tax_amount = flt(tax["price"])  # This will be in Shopify currency
+			
 			taxes.append(
 				{
 					"charge_type": "Actual",
@@ -375,10 +527,10 @@ def update_taxes_with_shipping_lines(taxes, shipping_lines, setting, items, taxe
 						get_tax_account_description(tax)
 						or f"{tax.get('title')} - {tax.get('rate') * 100.0:.2f}%"
 					),
-					"tax_amount": tax["price"],
+					"tax_amount": tax_amount,
 					"cost_center": setting.cost_center,
 					"item_wise_tax_detail": {
-						setting.shipping_item: [flt(tax.get("rate")) * 100, flt(tax.get("price"))]
+						setting.shipping_item: [flt(tax.get("rate")) * 100, tax_amount]
 					}
 					if shipping_as_item
 					else {},
