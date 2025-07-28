@@ -28,7 +28,7 @@ DEFAULT_TAX_FIELDS = {
 	"shipping": "default_shipping_charges_account",
 }
 warehouse_destination_map = {
-	"Shopify Available for Sale - KR": "Karen Graded Sold - KR",
+	"Online Available for Sale - KR": "Karen Graded Sold - KR",
 	# "Ravine Available for Sale - KR": "Ravine Graded Sold - KR",
 }
 
@@ -86,7 +86,7 @@ def get_exchange_rate(from_currency, to_currency, transaction_date=None):
 
 def get_company_currency(company):
 	"""Get company's default currency"""
-	return frappe.get_cached_value("Company", company, "default_currency") or "USD"
+	return frappe.get_cached_value("Company", company, "default_currency") or "EUR"
 
 def sync_sales_order(payload, request_id=None):
 	order = payload
@@ -123,8 +123,8 @@ def create_order(order, setting, company=None):
     from ecommerce_integrations.shopify.invoice import create_sales_invoice
 
     # Get company default currency
-    company_currency = frappe.get_cached_value("Company", setting.company, "default_currency") or "USD"
-    shopify_currency = order.get("currency") or order.get("presentment_currency") or "USD"
+    company_currency = frappe.get_cached_value("Company", setting.company, "default_currency") or "EUR"
+    shopify_currency = order.get("currency") or order.get("presentment_currency") or "EUR"
     order_date = order.get("created_at") or nowdate()
 
     if shopify_currency != company_currency:
@@ -203,7 +203,7 @@ def create_sales_order(shopify_order, setting, company=None):
 
 	if not so:
 		# Get currency information from Shopify order
-		shopify_currency = shopify_order.get("currency") or shopify_order.get("presentment_currency") or "USD"
+		shopify_currency = shopify_order.get("currency") or shopify_order.get("presentment_currency") or "EUR"
 		company_currency = get_company_currency(setting.company)
 		order_date = getdate(shopify_order.get("created_at")) or nowdate()
 		
@@ -476,7 +476,7 @@ def get_tax_account_description(tax):
 	return tax_description
 
 
-def update_taxes_with_shipping_lines(taxes, shipping_lines, setting, items, taxes_inclusive=False, shopify_currency="USD", conversion_rate=1.0):
+def update_taxes_with_shipping_lines(taxes, shipping_lines, setting, items, taxes_inclusive=False, shopify_currency="EUR", conversion_rate=1.0):
 	"""Shipping lines represents the shipping details,
 	each such shipping detail consists of a list of tax_lines"""
 	shipping_as_item = cint(setting.add_shipping_as_item) and setting.shipping_item
