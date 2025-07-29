@@ -310,6 +310,8 @@ def get_order_items(order_items, setting, delivery_date, taxes_inclusive, shopif
 					"custom_length": _get_item_length(shopify_item),
 					"qty": shopify_item.get("quantity"),
 					"stock_uom": "Stems",
+					"uom":"Stems",
+					"conversion_factor": 1.0,
 					"warehouse": destination_warehouse,
 					"custom_source_warehouse": source_warehouse,
 					ORDER_ITEM_DISCOUNT_FIELD: (
@@ -500,7 +502,7 @@ def update_taxes_with_shipping_lines(taxes, shipping_lines, setting, items, taxe
 						"rate": shipping_charge_amount,  # This will be in Shopify currency
 						"delivery_date": items[-1]["delivery_date"] if items else nowdate(),
 						"qty": 1,
-						"stock_uom": "Nos",
+						"stock_uom": "Stems",
 						"warehouse": setting.warehouse,
 					}
 				)
